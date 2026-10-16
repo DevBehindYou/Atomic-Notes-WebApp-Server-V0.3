@@ -1,0 +1,15 @@
+.env
+.env.*
+!.env.example
+node_modules/
+dist/
+build/
+coverage/
+.vercel/
+*.log
+*.tsbuildinfo
+auth.json
+*.jks
+*.keystore
+Conversation-Recovery-*/
+.DS_Store
