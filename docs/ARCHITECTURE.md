@@ -20,4 +20,4 @@ The hosting topology and mutation delegation must be documented and proven in di
 4. Prove mutation delegation, replay/fencing, retained-operation/financial compatibility and rollback before exposing browser writes.
 5. Verify real provider registrations and concrete deployment configuration only when supplied and approved by the owner.
 
-Independent repositories and release schedules must preserve the same data invariants. Android Server 2.03.9 readiness is a separate decision, not implied by a green browser build.
+Independent repositories and release schedules must preserve the same data invariants. Android Server readiness is a separate decision, not implied by a green browser build. The bounded staging foundation and its deliberately unavailable browser readiness are documented in [DEPLOYMENT.md](DEPLOYMENT.md).
