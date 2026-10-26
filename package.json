@@ -1,0 +1,27 @@
+{
+  "name": "atomic-notes-webapp-server",
+  "version": "0.3.0",
+  "private": true,
+  "license": "UNLICENSED",
+  "type": "module",
+  "engines": {
+    "node": "22.x"
+  },
+  "scripts": {
+    "dev": "node --import tsx --watch src/dev.ts",
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc --noEmit -p tsconfig.test.json",
+    "test": "node --import tsx --test tests/app.test.ts",
+    "test:entrypoint": "node --test tests/entrypoint.test.mjs",
+    "verify": "npm run typecheck && npm test && npm run build && npm run test:entrypoint"
+  },
+  "dependencies": {
+    "hono": "4.13.11"
+  },
+  "devDependencies": {
+    "@hono/node-server": "1.19.17",
+    "@types/node": "22.20.2",
+    "tsx": "4.23.13",
+    "typescript": "5.9.3"
+  }
+}
