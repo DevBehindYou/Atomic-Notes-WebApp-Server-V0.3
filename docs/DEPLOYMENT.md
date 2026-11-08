@@ -10,6 +10,7 @@ Suggested project name: `atomic-notes-webapp-server-staging`. Create a separate 
 - Build command: `npm run build` (strict TypeScript compilation).
 - Output Directory: leave unset; Vercel serves the Hono application, not a static `dist` directory.
 - Required application environment variables: **none** for this foundation. Do not copy AppServer, OAuth, MongoDB, Drive or production credentials into it.
+- Leave `ATOMIC_BROWSER_SESSIONS_ENABLED` and `ATOMIC_BROWSER_ALLOWED_ORIGINS` unset. The C36 browser session capability is fixture-proven only and must not be enabled in a deployment. See [BROWSER_SESSIONS.md](BROWSER_SESSIONS.md).
 
 The source entrypoint starts no listener. `src/dev.ts` is a separate local-only adapter used by `npm run dev` at `http://127.0.0.1:3001`. To exercise Vercel's own default-export development path after installing a reviewed Vercel CLI, use `vercel dev` from this repository. Current platform behavior is documented in [Hono on Vercel](https://vercel.com/docs/frameworks/backend/hono).
 
@@ -29,7 +30,7 @@ Run `npm run verify` before deployment. CI installs the committed lockfile, type
 {"status":"not_ready","service":"atomic-notes-webapp-server","browser_session":"unimplemented","appserver_delegation":"unimplemented"}
 ```
 
-HEAD probes preserve the corresponding status and headers without a body. Unsupported routes and methods return 404 with `{"error":"not_found"}`. Unexpected application errors return 500 with `{"error":"internal_server_error"}`. Responses include `Cache-Control: no-store, no-cache, must-revalidate` and `X-Content-Type-Options: nosniff`. No request URL, exception message, stack or environment value is returned. This app creates no cookies and grants no cross-origin access.
+HEAD probes preserve the corresponding status and headers without a body. Unsupported routes and methods return 404 with `{"error":"not_found"}`. Unexpected application errors return 500 with `{"error":"internal_server_error"}`. Responses include `Cache-Control: no-store, no-cache, must-revalidate` and `X-Content-Type-Options: nosniff`. No request URL, exception message, stack or environment value is returned. With the browser session capability off (the default), this app creates no cookies. It grants no cross-origin access.
 
 After the owner connects the intended Vercel team and project, deploy only to the isolated staging project and check those two endpoints against the actual URL. Confirm the reported service identity to distinguish it from AppServer. Record the deployed commit and URL. A successful deployment and a 200 health result prove only that this bounded foundation is serving; readiness must remain 503 at this stage. No deployment has been proven by the local build alone.
 

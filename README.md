@@ -4,7 +4,7 @@ Dedicated browser-specific backend workspace for Atomic Notes, maintained by Dev
 
 This public source-available repository separates browser session/authentication, origin/CSRF policy and browser gateway modules from Android Server optimization. Shared MongoDB/Drive/financial mutations still require one reviewed authoritative implementation. A second repository is not permission to run an independent competing writer against existing data.
 
-The Node.js 22 / TypeScript / Hono foundation can be deployed independently to Vercel. `GET /api/health` confirms process liveness; `GET /api/ready` deliberately returns 503 because browser sessions and AppServer delegation are unimplemented. No browser authentication, note APIs, persistence or shared-data writes are enabled. See [architecture and acceptance](docs/ARCHITECTURE.md) and [staging deployment](docs/DEPLOYMENT.md).
+The Node.js 22 / TypeScript / Hono foundation can be deployed independently to Vercel. `GET /api/health` confirms process liveness; `GET /api/ready` deliberately returns 503 because browser sessions and AppServer delegation are unimplemented. No browser authentication, note APIs, persistence or shared-data writes are enabled. A fixture-proven browser session lifecycle (C36) exists behind the default-off `ATOMIC_BROWSER_SESSIONS_ENABLED` flag. It has no real identity provider or durable store and must stay off in deployments; see [browser sessions](docs/BROWSER_SESSIONS.md). See [architecture and acceptance](docs/ARCHITECTURE.md) and [staging deployment](docs/DEPLOYMENT.md).
 
 For local verification, use Node.js 22, `npm ci --ignore-scripts`, then `npm run verify`. `npm run dev` serves only on `http://127.0.0.1:3001`; the deployed entrypoint is the default Hono export in `src/app.ts`.
 
