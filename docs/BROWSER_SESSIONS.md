@@ -98,8 +98,9 @@ response, a header or the store. Credential custody for AppServer delegation is 
 ## Dependencies and contract pins
 
 C22 and C26 (AppServer) are merged. C30 (AppServer capability contract, Server PR #98) is
-pinned by contract only: this gateway does not call the AppServer, and `delegation` remains
-`unsupported`. Delegation is C38.
+pinned by contract only. C38 adds a default-off AppServer delegation client behind
+`ATOMIC_APPSERVER_DELEGATION_ENABLED`, pinned to Server commit
+`bc815942e60e21c37460674becaa092cb5b98ade`. See [APPSERVER_DELEGATION.md](APPSERVER_DELEGATION.md).
 
 ## Open decisions
 

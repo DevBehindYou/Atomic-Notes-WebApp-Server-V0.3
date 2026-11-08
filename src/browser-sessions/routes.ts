@@ -10,6 +10,16 @@ import {
   type Resolution,
 } from './service.js';
 import type { SessionRecord } from './store.js';
+import { DelegationClient, type DelegationSigner, type DelegationTransport } from '../delegation/client.js';
+import type { DelegationGate } from '../delegation/config.js';
+
+/** C38 AppServer delegation wiring. The signer and transport are injected by code only. */
+export interface DelegationWiring {
+  readonly gate: DelegationGate;
+  readonly signer?: DelegationSigner;
+  readonly transport?: DelegationTransport;
+}
+const DELEGATION_ROUTE = '/api/session/delegation';
 
 const MAX_LOGIN_BODY_BYTES = 8192;
 const MAX_ASSERTION_LENGTH = 4096;
@@ -34,10 +44,14 @@ export function registerBrowserSessionRoutes(
   app: Hono,
   gate: BrowserSessionGate,
   dependencies: BrowserSessionDependencies,
+  delegation: DelegationWiring = { gate: { state: 'disabled' } },
 ): void {
   if (gate.state === 'disabled') return;
+  // Delegation exists only behind its own gate, and only on top of browser sessions.
+  const routes: Record<string, SessionRouteMethod> = delegation.gate.state === 'disabled'
+    ? { ...SESSION_ROUTES } : { ...SESSION_ROUTES, [DELEGATION_ROUTE]: 'POST' };
   if (gate.state === 'misconfigured') {
-    for (const path of Object.keys(SESSION_ROUTES)) {
+    for (const path of Object.keys(routes)) {
       app.on(['GET', 'POST'], path, (context) => context.json({ error: 'browser_sessions_unavailable' }, 503));
     }
     return;
@@ -45,7 +59,7 @@ export function registerBrowserSessionRoutes(
 
   const service = new BrowserSessionService(dependencies);
   // Method, fetch metadata, Origin and media type are enforced before any handler runs.
-  for (const [path, method] of Object.entries(SESSION_ROUTES)) {
+  for (const [path, method] of Object.entries(routes)) {
     app.use(path, sessionRequestGuard(gate.allowedOrigins, method));
   }
 
@@ -141,12 +155,56 @@ export function registerBrowserSessionRoutes(
     return context.json(statusBody(issued.session, issued.id));
   });
 
+  if (delegation.gate.state !== 'disabled') registerDelegationRoute(service, delegation, presentedForUnsafe, app);
+
   app.post('/api/session/logout', async (context) => {
     const current = await presentedForUnsafe(context, requestOrigin(context) as string);
     if (current.rejection !== undefined) return current.rejection;
     if (current.resolution.kind === 'active') await service.revokeFamily(current.resolution.session.familyId);
     context.header('Set-Cookie', CLEAR_SESSION_COOKIE);
     return context.json({ signedIn: false });
+  });
+}
+
+/**
+ * `POST /api/session/delegation` (C38): asks the AppServer to verify a delegation for the
+ * presented, authenticated session. The request body is never read, so no browser-supplied
+ * account id, scope or token can reach the assertion; it is built from the session record
+ * alone. The assertion is never returned, and the response carries only the granted scope
+ * and expiry. Without a valid gate, signer and transport it answers 503 and calls nothing.
+ */
+function registerDelegationRoute(
+  service: BrowserSessionService,
+  delegation: DelegationWiring,
+  presentedForUnsafe: (context: Context, origin: string) => Promise<PresentedSession>,
+  app: Hono,
+): void {
+  const { gate, signer, transport } = delegation;
+  const client = gate.state === 'enabled' && signer !== undefined && transport !== undefined
+    ? new DelegationClient({
+      audience: gate.audience, issuer: gate.issuer, keyId: gate.keyId, signer, transport,
+      idleTtlMs: service.policy.idleTtlMs, clock: () => service.now(),
+    })
+    : undefined;
+
+  app.post(DELEGATION_ROUTE, async (context) => {
+    if (client === undefined) return context.json({ error: 'delegation_unavailable' }, 503);
+    const current = await presentedForUnsafe(context, context.req.header('origin') as string);
+    if (current.rejection !== undefined) return current.rejection;
+    if (current.resolution.kind !== 'active' || current.resolution.session.accountId === null) {
+      if (current.resolution.kind === 'none' && current.resolution.clearCookie) context.header('Set-Cookie', CLEAR_SESSION_COOKIE);
+      return context.json({ error: 'session_required' }, 401);
+    }
+    const outcome = await client.delegate(current.resolution.session);
+    if (outcome.ok) {
+      return context.json({ delegated: true, scope: outcome.scope, expiresAt: new Date(outcome.expiresAt).toISOString() });
+    }
+    switch (outcome.reason) {
+      case 'session_required': return context.json({ error: 'session_required' }, 401);
+      case 'account_unsupported': return context.json({ error: 'delegation_unavailable' }, 503);
+      case 'appserver_rejected': return context.json({ error: 'delegation_rejected' }, 502);
+      default: return context.json({ error: 'delegation_unavailable' }, 503);
+    }
   });
 }
 
