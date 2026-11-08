@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { randomBytes } from 'node:crypto';
 import test from 'node:test';
 import { createApp } from '../src/app.js';
+import { readBoundedUtf8 } from '../src/browser-sessions/routes.js';
 import { hashSessionId } from '../src/browser-sessions/service.js';
 import { MemorySessionStore } from '../src/browser-sessions/store.js';
 import {
@@ -475,4 +476,65 @@ test('no provider or AppServer tokens reach browser responses or the session sto
   for (const rawId of [preAuthId, aliceId, rotatedId, bobId, finalId]) assert.equal(stored.includes(rawId), false);
   assert.equal(stored.includes(hashSessionId(finalId)), true);
   assert.doesNotMatch(stored, /credential|token/i);
+});
+
+/** A request body delivered as a stream with no Content-Length, in [chunks]. */
+function streamed(chunks: Uint8Array[], pulled: { count: number }, headers: Record<string, string> = {}): Request {
+  let index = 0;
+  const body = new ReadableStream<Uint8Array>({
+    pull(controller) {
+      pulled.count++;
+      if (index < chunks.length) controller.enqueue(chunks[index++] as Uint8Array);
+      else controller.close();
+    },
+  });
+  return new Request('http://gateway.test/api/session/login', {
+    method: 'POST',
+    headers: { origin: ORIGIN, 'content-type': 'application/json', ...headers },
+    body,
+    duplex: 'half',
+  } as RequestInit);
+}
+
+test('login bodies are capped by bytes actually read, never by a declared or UTF-16 length', async () => {
+  const verifier = new FixtureIdentityVerifier();
+  const { send, store } = harness({ verifier });
+  const app = createApp({ env: ENABLED_ENV, browserSessions: { store, verifier } });
+  const before = JSON.stringify(store.snapshot());
+  const callsBefore = verifier.calls.length;
+
+  // A valid assertion padded with 5,000 three-byte characters: under the
+  // 8,192 UTF-16 code units the old check counted, but over 8 KiB of UTF-8.
+  const multibyte = JSON.stringify({ assertion: ALICE_ASSERTION, pad: '€'.repeat(5000) });
+  assert.ok(multibyte.length < 8192 && Buffer.byteLength(multibyte) > 8192);
+  const response = await send('/api/session/login', {
+    method: 'POST', rawBody: multibyte, headers: { 'content-type': 'application/json' } });
+  assert.equal(response.status, 400, response.text);
+
+  // No Content-Length (chunked) and a false small Content-Length: reading stops
+  // just past the cap and the stream is cancelled.
+  const big = new Uint8Array(1024).fill(0x20);
+  for (const headers of [{}, { 'content-length': '10' }]) {
+    const pulled = { count: 0 };
+    const chunks = Array.from({ length: 64 }, () => big);
+    const result = await app.request(streamed(chunks, pulled, headers));
+    assert.equal(result.status, 400);
+    assert.equal(result.headers.get('set-cookie'), null);
+    assert.ok(pulled.count <= 10, `read ${pulled.count} chunks of 64`);
+  }
+
+  // Invalid UTF-8 is refused, not replaced.
+  const invalid = await app.request(streamed([new Uint8Array([0x7b, 0xff, 0xfe, 0x7d])], { count: 0 }));
+  assert.equal(invalid.status, 400);
+
+  assert.equal(verifier.calls.length, callsBefore, 'the verifier never saw any of these bodies');
+  assert.equal(JSON.stringify(store.snapshot()), before, 'nothing was stored');
+});
+
+test('readBoundedUtf8 returns the body within the cap and undefined past it', async () => {
+  const ok = await readBoundedUtf8(new Request('http://x.test', { method: 'POST', body: '{"a":"€"}' }), 64);
+  assert.equal(ok, '{"a":"€"}');
+  assert.equal(await readBoundedUtf8(new Request('http://x.test', { method: 'POST', body: 'x'.repeat(65) }), 64), undefined);
+  assert.equal(await readBoundedUtf8(new Request('http://x.test', { method: 'POST', body: 'x'.repeat(64) }), 64), 'x'.repeat(64));
+  assert.equal(await readBoundedUtf8(new Request('http://x.test'), 64), '');
 });

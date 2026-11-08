@@ -77,7 +77,9 @@ serverless instances.
 
 Unsafe methods require an `Origin` header in the allowlist. Any presented `Origin` must be
 allowlisted. `Sec-Fetch-Site: cross-site` is rejected. Login also requires
-`Content-Type: application/json` and a body of at most 8 KiB. C37 owns the complete
+`Content-Type: application/json` and a body of at most 8 KiB of valid UTF-8, counted on the
+bytes actually read (a missing or false `Content-Length` cannot raise it; reading stops and
+the stream is cancelled at the cap). C37 owns the complete
 CSRF/state/fetch-metadata policy. No CORS headers are emitted. The browser app and this
 gateway must be same-site, ideally same-origin, for `SameSite=Strict` cookies to be sent.
 

@@ -133,8 +133,10 @@ async function readAssertion(context: Context): Promise<string | undefined> {
   if (!/^application\/json(\s*;|$)/i.test(contentType)) return undefined;
   const declaredLength = Number(context.req.header('content-length') ?? '0');
   if (Number.isFinite(declaredLength) && declaredLength > MAX_LOGIN_BODY_BYTES) return undefined;
-  const text = await context.req.text();
-  if (text.length > MAX_LOGIN_BODY_BYTES) return undefined;
+  // The declared length may be missing or false, so the cap is enforced on the
+  // bytes actually read, and the body is never buffered past it.
+  const text = await readBoundedUtf8(context.req.raw, MAX_LOGIN_BODY_BYTES);
+  if (text === undefined) return undefined;
   let body: unknown;
   try {
     body = JSON.parse(text);
@@ -145,4 +147,42 @@ async function readAssertion(context: Context): Promise<string | undefined> {
   const assertion = (body as Record<string, unknown>)['assertion'];
   if (typeof assertion !== 'string' || assertion.length === 0 || assertion.length > MAX_ASSERTION_LENGTH) return undefined;
   return assertion;
+}
+
+/**
+ * Reads at most [maxBytes] of [request]'s body as strict UTF-8. Returns
+ * undefined, after cancelling the stream, when the body is larger or is not
+ * valid UTF-8. Nothing beyond the cap is read or held.
+ */
+export async function readBoundedUtf8(request: Request, maxBytes: number): Promise<string | undefined> {
+  const stream = request.body;
+  if (stream === null) return '';
+  const reader = stream.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      total += value.byteLength;
+      if (total > maxBytes) {
+        await reader.cancel().catch(() => undefined);
+        return undefined;
+      }
+      chunks.push(value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  const bytes = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  try {
+    return new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+  } catch {
+    return undefined;
+  }
 }
