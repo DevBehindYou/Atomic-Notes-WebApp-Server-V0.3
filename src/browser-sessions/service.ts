@@ -61,8 +61,14 @@ export class BrowserSessionService {
   /**
    * Resolves the presented session id. Unknown ids are never adopted (fixation);
    * expired ids are revoked; a replayed rotated id revokes its whole family.
+   * `touch: false` leaves an active session's idle clock alone, for requests that
+   * have not yet proved they are genuine (the C37 anti-CSRF check comes after).
    */
-  async resolve(presentedId: string | undefined, requestOrigin: string | undefined, options: { rotate: boolean }): Promise<Resolution> {
+  async resolve(
+    presentedId: string | undefined,
+    requestOrigin: string | undefined,
+    options: { rotate: boolean; touch?: boolean },
+  ): Promise<Resolution> {
     if (presentedId === undefined) return { kind: 'none', clearCookie: false };
     if (!SESSION_ID_PATTERN.test(presentedId)) return { kind: 'none', clearCookie: true };
 
@@ -92,16 +98,9 @@ export class BrowserSessionService {
       return { kind: 'active', session: { ...session, idHash: nextIdHash, rotatedAt: now, lastSeenAt: now }, issuedId: nextId };
     }
 
+    if (options.touch === false) return { kind: 'active', session };
     await this.#store.touch(session.familyId, now);
     return { kind: 'active', session: { ...session, lastSeenAt: now } };
-  }
-
-  /** Revokes whatever family the presented id belongs to (current or retired). */
-  async revokePresented(presentedId: string | undefined): Promise<void> {
-    if (presentedId === undefined || !SESSION_ID_PATTERN.test(presentedId)) return;
-    const found = await this.#store.lookup(hashSessionId(presentedId));
-    if (found === undefined) return;
-    await this.#store.revokeFamily(found.status === 'current' ? found.session.familyId : found.familyId);
   }
 
   async revokeFamily(familyId: string): Promise<void> {

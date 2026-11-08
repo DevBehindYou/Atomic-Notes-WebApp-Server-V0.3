@@ -1,5 +1,7 @@
 # Browser session lifecycle (C36)
 
+Origin, CSRF, method and CORS policy for these routes is in [BROWSER_CSRF.md](BROWSER_CSRF.md) (C37).
+
 Status: implemented behind a default-off capability and proven only against controlled
 fixtures. No real OAuth provider, client secret, durable store or AppServer delegation is
 wired. `GET /api/ready` still returns the same 503 body in every configuration.
@@ -16,7 +18,8 @@ wired. `GET /api/ready` still returns the same 503 body in every configuration.
 The deployed default export reads `process.env`. **Do not set the flag in any deployed
 environment.** The default wiring uses a process-local memory store and has no identity
 verifier, so login answers `503 {"error":"identity_unavailable"}`. Enabling it requires a
-reviewed durable store, a reviewed identity verifier, C37 CSRF policy and an owner decision.
+reviewed durable store, a reviewed identity verifier and an owner decision. The C37 CSRF policy
+is in place behind the same flag.
 
 ## Routes (enabled only)
 
@@ -24,15 +27,17 @@ reviewed durable store, a reviewed identity verifier, C37 CSRF policy and an own
 | --- | --- | --- |
 | `GET /api/session` | optional, allowlisted if present | Non-secret status. May rotate the id |
 | `GET /api/session/accounts/:accountId` | optional, allowlisted if present | `200` status when the session owns `accountId`; `401 session_required`; `403 account_mismatch` |
-| `POST /api/session/start` | required | Revokes any presented session and issues a pre-authentication session (10 minutes) |
-| `POST /api/session/login` | required | JSON `{"assertion": "..."}` verified by the `IdentityVerifier` port. Always issues a new id |
-| `POST /api/session/logout` | required | Deletes the session family server-side and clears the cookie. Idempotent |
+| `POST /api/session/start` | required | Revokes any presented session (token required) and issues a pre-authentication session (10 minutes) |
+| `POST /api/session/login` | required | JSON `{"assertion": "..."}` verified by the `IdentityVerifier` port. Token required when a session is presented. Always issues a new id |
+| `POST /api/session/logout` | required | Deletes the session family server-side (token required) and clears the cookie. Idempotent |
 
-The browser only ever receives `{"signedIn": false}` or
-`{"signedIn": true, "accountHint"?: string, "expiresAt": ISO-8601}`. `expiresAt` is the earlier of the
-absolute and idle deadlines. The fixed error bodies are `origin_rejected` (403), `invalid_request`
-(400), `identity_rejected` (401), `identity_unavailable` (503), `session_required` (401) and
-`account_mismatch` (403).
+Any other method on these paths is `405` (C37). The browser only ever receives
+`{"signedIn": false}`, `{"signedIn": false, "csrf": string}` for a pre-authentication session, or
+`{"signedIn": true, "accountHint"?: string, "expiresAt": ISO-8601, "csrf": string}`. `csrf` is the
+C37 anti-CSRF token. `expiresAt` is the earlier of the absolute and idle deadlines. The fixed
+error bodies are `origin_rejected` (403), `csrf_rejected` (403), `method_not_allowed` (405),
+`unsupported_media_type` (415), `invalid_request` (400), `identity_rejected` (401),
+`identity_unavailable` (503), `session_required` (401) and `account_mismatch` (403).
 
 ## Cookie
 
@@ -73,15 +78,15 @@ serverless instances.
 - **Account binding:** a session for account A gets `403` on account B's scope. Logging in as B
   while holding A's cookie revokes A's session.
 
-## Origin policy (minimal; full CSRF is C37)
+## Origin policy
 
-Unsafe methods require an `Origin` header in the allowlist. Any presented `Origin` must be
-allowlisted. `Sec-Fetch-Site: cross-site` is rejected. Login also requires
-`Content-Type: application/json` and a body of at most 8 KiB of valid UTF-8, counted on the
-bytes actually read (a missing or false `Content-Length` cannot raise it; reading stops and
-the stream is cancelled at the cap). C37 owns the complete
-CSRF/state/fetch-metadata policy. No CORS headers are emitted. The browser app and this
-gateway must be same-site, ideally same-origin, for `SameSite=Strict` cookies to be sent.
+See [BROWSER_CSRF.md](BROWSER_CSRF.md). In short, unsafe methods require an exact allowlisted
+`Origin`, `Content-Type: application/json` and, when a session is presented, its anti-CSRF
+token. `Sec-Fetch-Site` must be `same-origin` when present. No CORS headers are emitted. Login
+bodies are at most 8 KiB of valid UTF-8, counted on the bytes actually read (a missing or false
+`Content-Length` cannot raise it; reading stops and the stream is cancelled at the cap). The
+browser app and this gateway must be same-site, ideally same-origin, for `SameSite=Strict`
+cookies to be sent.
 
 ## Identity port
 
@@ -104,4 +109,5 @@ pinned by contract only: this gateway does not call the AppServer, and `delegati
 3. The deployment topology. A same-origin rewrite or a shared registrable domain is needed for
    `SameSite=Strict`, and `vercel.app` subdomains are cross-site.
 4. Whether `expiresAt` should also expose the absolute deadline separately.
-5. Pre-authentication session binding to C37 OAuth `state`/PKCE.
+5. Pre-authentication session binding to OAuth `state`/PKCE. C37 adds no `state` nonce because no
+   provider exists. See [BROWSER_CSRF.md](BROWSER_CSRF.md).
