@@ -37,6 +37,8 @@ interface SendOptions {
   body?: unknown;
   rawBody?: string;
   headers?: Record<string, string>;
+  /** Anti-CSRF token header (C37). */
+  csrf?: string;
 }
 
 interface Exchange {
@@ -56,6 +58,8 @@ function harness(options: { verifier?: FixtureIdentityVerifier | null } = {}) {
     browserSessions: { store, clock: () => now, ...(verifier === undefined ? {} : { verifier }) },
   });
   const transcript: Exchange[] = [];
+  /** Anti-CSRF token last returned for each raw session id. */
+  const tokens = new Map<string, string>();
 
   async function send(path: string, request: SendOptions = {}): Promise<Exchange> {
     const method = request.method ?? 'GET';
@@ -68,6 +72,8 @@ function harness(options: { verifier?: FixtureIdentityVerifier | null } = {}) {
       body = JSON.stringify(request.body);
       headers['content-type'] ??= 'application/json';
     }
+    if (method === 'POST' && body === undefined) headers['content-type'] ??= 'application/json';
+    if (request.csrf !== undefined) headers['x-atomic-csrf'] = request.csrf;
     const response = await app.request(path, { method, headers, ...(body === undefined ? {} : { body }) });
     const text = await response.text();
     const exchange: Exchange = {
@@ -79,12 +85,17 @@ function harness(options: { verifier?: FixtureIdentityVerifier | null } = {}) {
     };
     assert.equal(response.headers.get('cache-control'), 'no-store, no-cache, must-revalidate');
     assert.equal(response.headers.get('access-control-allow-origin'), null);
+    const token = (exchange.json as { csrf?: unknown } | undefined)?.csrf;
+    const tokenOwner = COOKIE_PATTERN.exec(exchange.setCookie ?? '')?.[1] ?? request.cookie;
+    if (typeof token === 'string' && tokenOwner !== undefined) tokens.set(tokenOwner, token);
     transcript.push(exchange);
     return exchange;
   }
 
   async function login(assertion = ALICE_ASSERTION, cookie?: string, origin = ORIGIN): Promise<string> {
-    const response = await send('/api/session/login', { method: 'POST', origin, cookie, body: { assertion } });
+    const csrf = cookie === undefined ? undefined : tokens.get(cookie);
+    const response = await send('/api/session/login', {
+      method: 'POST', origin, cookie, body: { assertion }, ...(csrf === undefined ? {} : { csrf }) });
     assert.equal(response.status, 200, response.text);
     return issuedId(response);
   }
@@ -95,6 +106,12 @@ function harness(options: { verifier?: FixtureIdentityVerifier | null } = {}) {
     transcript,
     send,
     login,
+    /** The anti-CSRF token the server last handed out for [id]. */
+    csrfOf(id: string): string {
+      const token = tokens.get(id);
+      assert.ok(token, 'no csrf token seen for this session');
+      return token;
+    },
     advance(ms: number) { now += ms; },
     now: () => now,
   };
@@ -124,7 +141,7 @@ test('flag off: session routes keep the existing 404 boundary and readiness is u
   ];
   for (const app of variants) {
     for (const path of SESSION_ROUTES) {
-      for (const method of ['GET', 'POST']) {
+      for (const method of ['GET', 'POST', 'OPTIONS', 'PUT', 'DELETE']) {
         const response = await app.request(path, {
           method,
           headers: { origin: ORIGIN, 'content-type': 'application/json', cookie: `__Host-atomic_session=${forgedId()}` },
@@ -179,10 +196,13 @@ test('login issues a 256-bit __Host- cookie with exact attributes and non-secret
   assert.equal(maxAge(response), 12 * 60 * 60);
   assert.doesNotMatch(response.setCookie ?? '', /Domain=/i);
   assert.equal(Buffer.from(issuedId(response), 'base64url').length, 32);
+  const { csrf } = response.json as { csrf: string };
+  assert.match(csrf, /^[A-Za-z0-9_-]{43}$/);
   assert.deepEqual(response.json, {
     signedIn: true,
     accountHint: 'a***@example.test',
     expiresAt: '2026-11-08T09:30:00.000Z',
+    csrf,
   });
   assert.deepEqual(verifier?.calls, [{ assertion: ALICE_ASSERTION, origin: ORIGIN }]);
 
@@ -232,14 +252,14 @@ test('fixation: server never adopts an id it did not issue', async () => {
 });
 
 test('fixation: a pre-login session id is replaced and invalidated at login', async () => {
-  const { send, login, store, advance } = harness();
+  const { send, login, store, advance, csrfOf } = harness();
   const start = await send('/api/session/start', { method: 'POST' });
-  assert.deepEqual(start.json, { signedIn: false });
   const preAuthId = issuedId(start);
+  assert.deepEqual(start.json, { signedIn: false, csrf: csrfOf(preAuthId) });
   assert.equal(maxAge(start), 10 * 60);
 
   const pending = await send('/api/session', { cookie: preAuthId });
-  assert.deepEqual(pending.json, { signedIn: false });
+  assert.deepEqual(pending.json, { signedIn: false, csrf: csrfOf(preAuthId) });
   assert.equal(pending.setCookie, null);
   assert.equal((await send('/api/session/accounts/acct-alice', { cookie: preAuthId })).status, 401);
 
@@ -338,14 +358,14 @@ test('rotation: re-login rotates even for the same account and invalidates the p
 });
 
 test('logout deletes the session server-side and clears the cookie', async () => {
-  const { send, login, store } = harness();
+  const { send, login, store, csrfOf } = harness();
   const sessionId = await login();
 
   const missingOrigin = await send('/api/session/logout', { method: 'POST', origin: null, cookie: sessionId });
   assert.equal(missingOrigin.status, 403);
   assert.equal(missingOrigin.setCookie, null);
 
-  const logout = await send('/api/session/logout', { method: 'POST', cookie: sessionId });
+  const logout = await send('/api/session/logout', { method: 'POST', cookie: sessionId, csrf: csrfOf(sessionId) });
   assert.equal(logout.status, 200);
   assert.deepEqual(logout.json, { signedIn: false });
   assert.equal(logout.setCookie, CLEAR_COOKIE);
@@ -425,12 +445,13 @@ test('wrong account: a session for account A cannot act as account B', async () 
   assert.equal((await send('/api/session/accounts/acct-alice', { cookie: bobId })).status, 403);
   const bob = await send('/api/session/accounts/acct-bob', { cookie: bobId });
   assert.equal(bob.status, 200);
-  assert.deepEqual(Object.keys(bob.json as object).sort(), ['expiresAt', 'signedIn']);
+  assert.deepEqual(Object.keys(bob.json as object).sort(), ['csrf', 'expiresAt', 'signedIn']);
 });
 
 test('rejected or malformed logins issue nothing and keep the existing session', async () => {
-  const { send, login } = harness();
+  const { send, login, csrfOf } = harness();
   const sessionId = await login();
+  const csrf = csrfOf(sessionId);
   const cases: SendOptions[] = [
     { body: { assertion: 'fixture-assertion-unknown' } },
     { body: { assertion: '' } },
@@ -442,15 +463,16 @@ test('rejected or malformed logins issue nothing and keep the existing session',
     { rawBody: JSON.stringify({ assertion: ALICE_ASSERTION }) },
   ];
   for (const request of cases) {
-    const response = await send('/api/session/login', { method: 'POST', cookie: sessionId, ...request });
-    assert.ok([400, 401].includes(response.status), response.text);
+    const response = await send('/api/session/login', { method: 'POST', cookie: sessionId, csrf, ...request });
+    // 415: the C37 guard refuses non-JSON media types before the route runs.
+    assert.ok([400, 401, 415].includes(response.status), response.text);
     assert.equal(response.setCookie, null);
   }
   assert.equal((await send('/api/session/accounts/acct-alice', { cookie: sessionId })).status, 200);
 });
 
 test('no provider or AppServer tokens reach browser responses or the session store', async () => {
-  const { send, login, store, transcript, advance } = harness();
+  const { send, login, store, transcript, advance, csrfOf } = harness();
   const preAuthId = issuedId(await send('/api/session/start', { method: 'POST' }));
   const aliceId = await login(ALICE_ASSERTION, preAuthId);
   await send('/api/session', { cookie: aliceId });
@@ -460,7 +482,7 @@ test('no provider or AppServer tokens reach browser responses or the session sto
   const bobId = await login(BOB_ASSERTION, rotatedId);
   await send('/api/session', { cookie: bobId, origin: FOREIGN_ORIGIN });
   await send('/api/session/login', { method: 'POST', body: { assertion: 'fixture-assertion-unknown' } });
-  await send('/api/session/logout', { method: 'POST', cookie: bobId });
+  await send('/api/session/logout', { method: 'POST', cookie: bobId, csrf: csrfOf(bobId) });
   const finalId = await login(ALICE_ASSERTION);
 
   const surfaced = transcript.map((exchange) => {
