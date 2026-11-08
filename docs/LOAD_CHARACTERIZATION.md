@@ -57,5 +57,5 @@ through the shared `readBoundedStreamUtf8` in `src/http/bounded-body.ts`. That
 is the same reader the login body uses.
 
 An answer that is larger, or that is not valid UTF-8, counts as unavailable.
-A regression test confirms that reading stops after at most 8 KiB-sized
+A regression test confirms that reading stops after at most 8 one-KiB
 chunks of an endless stream.
