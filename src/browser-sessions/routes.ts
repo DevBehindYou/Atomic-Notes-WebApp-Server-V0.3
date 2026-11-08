@@ -10,6 +10,7 @@ import {
   type Resolution,
 } from './service.js';
 import type { SessionRecord } from './store.js';
+import { readBoundedStreamUtf8 } from '../http/bounded-body.js';
 import { DelegationClient, type DelegationSigner, type DelegationTransport } from '../delegation/client.js';
 import type { DelegationGate } from '../delegation/config.js';
 
@@ -239,34 +240,5 @@ async function readAssertion(context: Context): Promise<string | undefined> {
  * valid UTF-8. Nothing beyond the cap is read or held.
  */
 export async function readBoundedUtf8(request: Request, maxBytes: number): Promise<string | undefined> {
-  const stream = request.body;
-  if (stream === null) return '';
-  const reader = stream.getReader();
-  const chunks: Uint8Array[] = [];
-  let total = 0;
-  try {
-    for (;;) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      total += value.byteLength;
-      if (total > maxBytes) {
-        await reader.cancel().catch(() => undefined);
-        return undefined;
-      }
-      chunks.push(value);
-    }
-  } finally {
-    reader.releaseLock();
-  }
-  const bytes = new Uint8Array(total);
-  let offset = 0;
-  for (const chunk of chunks) {
-    bytes.set(chunk, offset);
-    offset += chunk.byteLength;
-  }
-  try {
-    return new TextDecoder('utf-8', { fatal: true }).decode(bytes);
-  } catch {
-    return undefined;
-  }
+  return readBoundedStreamUtf8(request.body, maxBytes);
 }
