@@ -1,5 +1,6 @@
 import { randomBytes } from 'node:crypto';
 import type { SessionRecord } from '../browser-sessions/store.js';
+import { readBoundedStreamUtf8 } from '../http/bounded-body.js';
 import {
   APPSERVER_ACCOUNT_ID,
   DELEGATION_CONTRACT,
@@ -131,6 +132,9 @@ function confirms(body: unknown, claims: DelegationClaims): boolean {
  * only uses a transport that code injects. It sends the assertion and nothing else: no
  * cookie, no Authorization header, no provider token, no redirects.
  */
+/** Largest AppServer verify answer the transport will read. */
+export const MAX_VERIFY_RESPONSE_BYTES = 4096;
+
 export function httpDelegationTransport(options: {
   readonly appServerOrigin: string;
   readonly fetch?: typeof fetch;
@@ -149,9 +153,13 @@ export function httpDelegationTransport(options: {
         credentials: 'omit',
         signal: AbortSignal.timeout(options.timeoutMs ?? 3000),
       });
+      // The AppServer's answer is small; never buffer more than the cap, whatever
+      // its Content-Length says, and treat anything larger or not UTF-8 as no answer.
+      const text = await readBoundedStreamUtf8(response.body, MAX_VERIFY_RESPONSE_BYTES);
+      if (text === undefined) return { kind: 'unavailable' };
       let body: unknown;
       try {
-        body = await response.json();
+        body = JSON.parse(text);
       } catch {
         return { kind: 'unavailable' };
       }

@@ -289,8 +289,38 @@ test('the HTTP transport sends only the assertion, with no credentials, cookies 
   assert.throws(() => httpDelegationTransport({ appServerOrigin: 'http://appserver.atomic.test' }));
 });
 
+test('the HTTP transport never buffers more than 4 KiB of an AppServer answer', async () => {
+  let pulled = 0;
+  const chunk = new TextEncoder().encode(' '.repeat(1024));
+  const endless = (status: number, headers: Record<string, string> = {}) => new Response(new ReadableStream<Uint8Array>({
+    pull(controller) {
+      pulled++;
+      if (pulled > 10_000) controller.close(); else controller.enqueue(chunk);
+    },
+  }), { status, headers });
+  let reply: Response = endless(200);
+  const transport = httpDelegationTransport({ appServerOrigin: 'https://appserver.atomic.test',
+    fetch: (async () => reply) as unknown as typeof fetch });
+  // No Content-Length, then a false small one: reading stops just past the cap.
+  for (const headers of [{}, { 'content-length': '20' }]) {
+    pulled = 0;
+    reply = endless(200, headers);
+    assert.deepEqual(await transport.verify('a'), { kind: 'unavailable' });
+    assert.ok(pulled <= 8, `read ${pulled} KiB chunks`);
+  }
+  // A padded verified answer over the cap is not trusted.
+  reply = new Response(JSON.stringify({ ...fixture.verifyResponse.body, pad: 'x'.repeat(5000) }), { status: 200 });
+  assert.deepEqual(await transport.verify('a'), { kind: 'unavailable' });
+  // Invalid UTF-8 is not answered.
+  reply = new Response(new Uint8Array([0x7b, 0xff, 0x7d]), { status: 401 });
+  assert.deepEqual(await transport.verify('a'), { kind: 'unavailable' });
+  // The real answer still fits.
+  reply = new Response(JSON.stringify(fixture.verifyResponse.body), { status: 200 });
+  assert.equal((await transport.verify('a')).kind, 'verified');
+});
+
 test('delegation modules import nothing beyond the session types and node:crypto', () => {
-  const allowed = ['node:crypto', './contract.js', './client.js', '../browser-sessions/store.js', '../browser-sessions/config.js'];
+  const allowed = ['node:crypto', './contract.js', './client.js', '../browser-sessions/store.js', '../browser-sessions/config.js', '../http/bounded-body.js'];
   for (const name of readdirSync(new URL('../src/delegation/', import.meta.url))) {
     const source = readFileSync(new URL(`../src/delegation/${name}`, import.meta.url), 'utf8');
     for (const [, spec] of source.matchAll(/from '([^']+)'/g)) assert.ok(allowed.includes(spec as string), `${name} imports ${spec}`);
