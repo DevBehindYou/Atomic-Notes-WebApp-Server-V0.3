@@ -26,9 +26,35 @@ max latency. It also gives:
 - lifecycles per second;
 - errors by step and status;
 - session families still live after logout;
-- RSS and heap before, after and at peak.
+- RSS and heap before and after, plus their maximum samples at batch boundaries.
+  These are sampled maxima, not continuous process peaks. The report includes
+  `memorySampling: before_after_and_batch_boundaries`. Measurement arrays and other
+  harness allocations are part of this process; no per-feature heap attribution is claimed.
+
+The benchmark identity verifier does not retain assertion history. The separate
+assertion-recording unit-test fixture is deliberately not used for memory sampling.
+
+## Delegation delay, failure and recovery
+
+The same command also runs four phases of `samplesPerPoint` delegation requests
+each at concurrency 8: baseline, a 5 ms injected provider delay, provider 503,
+and recovery. Phases and sample counts are chosen in advance. All requests in
+the recovery phase count; a final success cannot erase previous failures.
+At least 200 requests per phase are required for `recoveryQualified`; the smaller
+unit-test smoke run remains explicitly insufficient.
+
+The workload uses ephemeral Ed25519 keys and a controlled `fetch` response,
+exercising the real signing, delegation route and capped response reader.
+No key, assertion, session id or account enters the report. Logical transport
+calls and UTF-8 body bytes at the gateway/delegation boundaries are separate
+fields. Headers, HTTP framing, sockets and TLS are **not measured** by this
+in-process workload. Expected 503 failures are recorded, and unexpected statuses
+or leaked session families cause the CLI to fail.
 
 ## First local observation (not production capacity)
+
+The table below is the historical v1 run. It predates the non-recording verifier
+and delegation workload; do not reuse it as v2 memory or delegation evidence.
 
 This was one run on a Windows development host, Node 22, with 200 lifecycles
 per point.

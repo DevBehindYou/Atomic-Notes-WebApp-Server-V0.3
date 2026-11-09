@@ -9,7 +9,8 @@
 import { writeFileSync } from 'node:fs';
 import { createApp } from '../../src/app.js';
 import { MemorySessionStore } from '../../src/browser-sessions/store.js';
-import { ALICE_ASSERTION, FixtureIdentityVerifier } from '../support/identity-fixture.js';
+import { ALICE_ASSERTION } from '../support/identity-fixture.js';
+import { benchmarkVerifier, characterizeDelegation } from './delegation-characterization.js';
 
 const ORIGIN = 'https://notes.atomic.test';
 const ENV = { ATOMIC_BROWSER_SESSIONS_ENABLED: 'true', ATOMIC_BROWSER_ALLOWED_ORIGINS: ORIGIN };
@@ -61,20 +62,26 @@ async function lifecycle(app: ReturnType<typeof createApp>, timings: Record<Step
 }
 
 export async function characterize(samplesPerPoint: number) {
+  if (!Number.isSafeInteger(samplesPerPoint) || samplesPerPoint < 1 || samplesPerPoint > 5000) {
+    throw new RangeError('benchmark_samples_out_of_range');
+  }
   const points = [];
   for (const concurrency of [1, 8, 32, 128]) {
     const store = new MemorySessionStore();
-    const app = createApp({ env: ENV, browserSessions: { store, verifier: new FixtureIdentityVerifier() } });
+    const app = createApp({ env: ENV, browserSessions: { store, verifier: benchmarkVerifier() } });
     const timings: Record<Step, number[]> = { start: [], login: [], status: [], logout: [] };
     const errors = new Map<string, number>();
     globalThis.gc?.();
     const before = process.memoryUsage();
     let peakRss = before.rss;
+    let peakHeap = before.heapUsed;
     const begun = performance.now();
     for (let done = 0; done < samplesPerPoint; done += concurrency) {
       const batch = Math.min(concurrency, samplesPerPoint - done);
       await Promise.all(Array.from({ length: batch }, () => lifecycle(app, timings, errors)));
-      peakRss = Math.max(peakRss, process.memoryUsage().rss);
+      const sample = process.memoryUsage();
+      peakRss = Math.max(peakRss, sample.rss);
+      peakHeap = Math.max(peakHeap, sample.heapUsed);
     }
     const elapsedMs = performance.now() - begun;
     const after = process.memoryUsage();
@@ -88,26 +95,31 @@ export async function characterize(samplesPerPoint: number) {
       memoryKiB: {
         rssBefore: Math.round(before.rss / 1024),
         rssAfter: Math.round(after.rss / 1024),
-        rssPeak: Math.round(peakRss / 1024),
+        rssSampledMax: Math.round(Math.max(peakRss, after.rss) / 1024),
+        heapUsedSampledMax: Math.round(Math.max(peakHeap, after.heapUsed) / 1024),
         heapUsedBefore: Math.round(before.heapUsed / 1024),
         heapUsedAfter: Math.round(after.heapUsed / 1024),
       },
     });
   }
   return {
-    version: 1,
+    version: 2,
     scope: 'in-process gateway session routes, in-memory store, fixture identity; not production capacity',
     node: process.version,
     samplesPerPoint,
+    memorySampling: 'before_after_and_batch_boundaries',
     points,
+    delegation: await characterizeDelegation(samplesPerPoint, summarize),
   };
 }
 
 if (import.meta.url === `file://${process.argv[1]?.replace(/\\/g, '/').replace(/^(?=[A-Za-z]:)/, '/')}`
     || process.argv[1]?.endsWith('session-characterization.ts')) {
-  const samples = Math.max(50, Math.min(5000, Number(process.argv[2] ?? 400) || 400));
+  const samples = Math.floor(Math.max(50, Math.min(5000, Number(process.argv[2] ?? 400) || 400)));
   const report = await characterize(samples);
   writeFileSync('ci-gateway-session-characterization.json', JSON.stringify(report, null, 2) + '\n');
+  if (report.points.some(p => Object.keys(p.errors).length > 0 || p.liveFamiliesAfterLogout !== 0)
+    || !report.delegation.workloadPassed) process.exitCode = 1;
   console.log(JSON.stringify(report.points.map(p => ({ c: p.concurrency, perSecond: p.lifecyclesPerSecond,
     loginP99: p.steps['login']?.p99Ms, errors: p.errors, liveFamilies: p.liveFamiliesAfterLogout }))));
 }
